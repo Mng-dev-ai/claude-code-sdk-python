@@ -21,7 +21,7 @@ from . import Transport
 
 logger = logging.getLogger(__name__)
 
-_MAX_BUFFER_SIZE = 1024 * 1024  # 1MB buffer limit
+_MAX_BUFFER_SIZE = 50 * 1024 * 1024  # 50MB buffer limit
 
 
 class SubprocessCLITransport(Transport):
