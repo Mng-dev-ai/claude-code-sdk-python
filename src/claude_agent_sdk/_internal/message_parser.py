@@ -1,6 +1,7 @@
 """Message parser for Claude Code SDK responses."""
 
 import logging
+import uuid
 from typing import Any
 
 from .._errors import MessageParseError
@@ -97,7 +98,7 @@ def parse_message(data: dict[str, Any]) -> Message:
                                 ThinkingBlock(
                                     thinking=block["thinking"],
                                     signature=block.get("signature")
-                                    or f"sig-{block['id']}",
+                                    or f"sig-{uuid.uuid4().hex}",
                                 )
                             )
                         case "tool_use":
