@@ -429,7 +429,7 @@ class ThinkingBlock:
     """Thinking content block."""
 
     thinking: str
-    signature: str | None = None
+    signature: str
 
 
 @dataclass

@@ -96,7 +96,8 @@ def parse_message(data: dict[str, Any]) -> Message:
                             content_blocks.append(
                                 ThinkingBlock(
                                     thinking=block["thinking"],
-                                    signature=block.get("signature"),
+                                    signature=block.get("signature")
+                                    or f"sig-{block['id']}",
                                 )
                             )
                         case "tool_use":
