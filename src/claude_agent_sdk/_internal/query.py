@@ -617,7 +617,11 @@ class Query:
         self._closed = True
         if self._tg:
             self._tg.cancel_scope.cancel()
-            # Wait for task group to complete cancellation
+            # Set a deadline to prevent _deliver_cancellation() busy-loop
+            # when tasks don't respond to cancellation cleanly.
+            # Uses the task group's own scope (not a nested scope) to avoid
+            # "not the current cancel scope" errors from anyio.
+            self._tg.cancel_scope.deadline = anyio.current_time() + 5.0
             with suppress(anyio.get_cancelled_exc_class()):
                 await self._tg.__aexit__(None, None, None)
         await self.transport.close()
