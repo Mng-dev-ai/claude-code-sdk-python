@@ -1,5 +1,6 @@
 """Query class for handling bidirectional control protocol."""
 
+import asyncio
 import json
 import logging
 import os
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
     from mcp.server import Server as McpServer
 
 logger = logging.getLogger(__name__)
+
+_READER_SHUTDOWN_TIMEOUT = 5.0
 
 
 def _convert_hook_output_for_cli(hook_output: dict[str, Any]) -> dict[str, Any]:
@@ -116,6 +119,14 @@ class Query:
             float(os.environ.get("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "60000")) / 1000.0
         )  # Convert ms to seconds
 
+        # Reader lifecycle — _run_reader owns the anyio task group so that
+        # enter and exit always happen in the same asyncio task, avoiding
+        # the cross-task RuntimeError from anyio's CancelScope.
+        self._reader_task: asyncio.Task[None] | None = None
+        self._reader_ready = asyncio.Event()
+        self._reader_done = asyncio.Event()
+        self._reader_start_exc: BaseException | None = None
+
     async def initialize(self) -> dict[str, Any] | None:
         """Initialize control protocol if in streaming mode.
 
@@ -164,10 +175,39 @@ class Query:
 
     async def start(self) -> None:
         """Start reading messages from transport."""
-        if self._tg is None:
-            self._tg = anyio.create_task_group()
-            await self._tg.__aenter__()
-            self._tg.start_soon(self._read_messages)
+        if self._reader_task is not None:
+            return
+
+        self._reader_ready.clear()
+        self._reader_done.clear()
+        self._reader_start_exc = None
+        self._reader_task = asyncio.create_task(self._run_reader())
+        await self._reader_ready.wait()
+        if self._reader_start_exc is not None:
+            raise self._reader_start_exc
+
+    async def _run_reader(self) -> None:
+        """Owns the anyio task group — enter and exit happen in this task.
+
+        The task group is entered and exited here so that anyio's
+        CancelScope never sees a cross-task mismatch.  Child tasks
+        (_read_messages, _handle_control_request, stream_input) are
+        started inside this group via _tg.start_soon().  When the
+        transport closes, _read_messages finishes, which lets the
+        task group exit naturally.
+        """
+        try:
+            async with anyio.create_task_group() as tg:
+                self._tg = tg
+                self._reader_ready.set()
+                tg.start_soon(self._read_messages)
+        except BaseException as exc:
+            if not self._reader_ready.is_set():
+                self._reader_start_exc = exc
+                self._reader_ready.set()
+        finally:
+            self._tg = None
+            self._reader_done.set()
 
     async def _read_messages(self) -> None:
         """Read messages from transport and route them."""
@@ -657,18 +697,27 @@ class Query:
             yield message
 
     async def close(self) -> None:
-        """Close the query and transport."""
+        """Close the query and transport.
+
+        Closes the transport first so _read_messages exits naturally
+        (sentinel/EOF unblocks the queue), then waits for the reader
+        task to finish.  Falls back to cancellation if the reader does
+        not exit within the timeout.
+        """
         self._closed = True
-        if self._tg:
-            self._tg.cancel_scope.cancel()
-            # Set a deadline to prevent _deliver_cancellation() busy-loop
-            # when tasks don't respond to cancellation cleanly.
-            # Uses the task group's own scope (not a nested scope) to avoid
-            # "not the current cancel scope" errors from anyio.
-            self._tg.cancel_scope.deadline = anyio.current_time() + 5.0
-            with suppress(anyio.get_cancelled_exc_class()):
-                await self._tg.__aexit__(None, None, None)
         await self.transport.close()
+
+        if self._reader_task is not None:
+            try:
+                await asyncio.wait_for(
+                    self._reader_done.wait(),
+                    timeout=_READER_SHUTDOWN_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                self._reader_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._reader_task
+            self._reader_task = None
 
     # Make Query an async iterator
     def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
